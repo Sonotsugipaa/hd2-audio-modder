@@ -3661,6 +3661,14 @@ if __name__ == "__main__":
 
     wwise_setup(app_state, show_warnings=True)
 
+    try:
+        slim_init(app_state.game_data_path)
+    except FileNotFoundError:
+        logger.warning("Unable to initialize slim decompression module; game data path may be invalid")
+
+    if sys.argv[1] == "--batch":
+        exit(1)
+
     lookup_store: db.FriendlyNameLookup | None = None
     
     if not os.path.exists(GAME_FILE_LOCATION):
@@ -3774,11 +3782,6 @@ if __name__ == "__main__":
             os.rename("audio_modder_temp", "audio_modder")
     except:
         pass
-    
-    try:
-        slim_init(app_state.game_data_path)
-    except FileNotFoundError:
-        logger.warning("Unable to initialize slim decompression module; game data path may be invalid")
         
     language = language_lookup("English (US)")
     window = MainWindow(app_state, lookup_store)
