@@ -1,11 +1,15 @@
 import sys
 import os
+import struct
 from dataclasses import dataclass
 from io import StringIO
 import re
+import copy
 
 import env
 import core
+import wwise_hierarchy_154
+import wwise_hierarchy_140
 
 
 
@@ -243,6 +247,11 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
                     return ("set seq not random", [instr[1]], None)
                 elif match_word_seq(instr, "cue", None, "gain", None, "db"):
                     return ("set cue gain", [instr[1]], [instr[3]])
+            case "add":
+                if match_word_seq(instr, "sequence", None, "gain", None, "db"):
+                    return ("add seq gain", [instr[1]], [instr[3]])
+                elif match_word_seq(instr, "cue", None, "gain", None, "db"):
+                    return ("add cue gain", [instr[1]], [instr[3]])
     return None
 
 
@@ -264,17 +273,21 @@ def remap_list_indices(src, dst):
 
 
 class ScriptContext:
+    wd_rel_root: str
     working_dir: str
     archives: list[str]
     sets: dict[str, set(str)]
     cue_replacements_by_cue:  dict[int, str]
     cue_replacements_by_file: dict[str, set(int)]
-    set_seq_gain: dict[int, float]
+    set_seq_gain: dict[int, (float, bool)] # ID -> (dB gain, is relative)
+    set_cue_gain: dict[int, (float, bool)] # ditto
     set_seq_random: dict[int, bool]
-    set_cue_gain: dict[int, float]
 
     def __init__(self):
-        self.working_dir = ""
+        envvar = "HD2AM_BATCH_REL_ROOT"
+        envvar = os.environ[envvar] if (envvar in os.environ) else ""
+        self.wd_rel_root = os.path.normpath(envvar)
+        self.working_dir = self.wd_rel_root
         self.archives = [ ]
         self.sets = dict()
         self.cue_replacements_by_cue = dict()
@@ -282,6 +295,9 @@ class ScriptContext:
         self.set_seq_gain = dict()
         self.set_seq_random = dict()
         self.set_cue_gain = dict()
+
+    def soft_reset(self):
+        self.working_dir = self.wd_rel_root
 
     def describe(self):
         return [
@@ -313,20 +329,78 @@ class ScriptContext:
                     self.cue_replacements_by_file[append_file].add(append_cue)
 
 
+def get_cue_gain(mod, cue_id, *, assume_zero = False):
+    audio = mod.get_audio_source(cue_id)
+    parent_base_params = [ ]
+    for parent in [p for p in audio.parents if isinstance(p, (wwise_hierarchy_154.Sound, wwise_hierarchy_140.Sound, wwise_hierarchy_140.MusicTrack, wwise_hierarchy_154.MusicTrack))]:
+        parent_base_params.append(copy.deepcopy(parent.baseParam))
+    gain_found = False
+    gain_val = 0.0 if assume_zero else None
+    for i, parent_base_param in enumerate(parent_base_params):
+        props = parent_base_param.propBundle
+        if 0x05 in props.pIDs:  # makeup gain is ID 5
+            gain_found = True
+            gain_val = float(struct.unpack("<f", props.pValues[props.pIDs.index(0x05)])[0])
+            break
+    return gain_val
+
+
+def set_cue_gain(mod, cue_id, gain):
+    audio = mod.get_audio_source(cue_id)
+    parent_base_params = [ ]
+    parents = [ ]
+    for parent in [p for p in audio.parents if isinstance(p, (wwise_hierarchy_154.Sound, wwise_hierarchy_140.Sound, wwise_hierarchy_140.MusicTrack, wwise_hierarchy_154.MusicTrack))]:
+        parent_base_params.append(copy.deepcopy(parent.baseParam))
+        parents.append(parent)
+    for base_param in parent_base_params:
+        if 0x05 not in base_param.propBundle.pIDs:
+            base_param.propBundle.add_prop_value_float(0x05, gain)
+        else:
+            base_param.propBundle.set_prop_value_float_by_pid(0x05, gain)
+    if len(parents) > 0:
+        for i, parent in enumerate(parents):
+            parent.set_data(baseParam = parent_base_params[i])
+
+
+def get_seq_gain(mod, seq_id, *, assume_zero = False):
+    hent = mod.get_hierarchy_entry(seq_id)
+    props = hent.baseParam.propBundle
+    if 0x05 in props.pIDs:
+        return float(struct.unpack("<f", props.pValues[props.pIDs.index(0x05)])[0])
+    else:
+        return 0.0 if assume_zero else None
+
+
+def set_seq_gain(mod, seq_id, gain):
+    hent = mod.get_hierarchy_entry(seq_id)
+    props = hent.baseParam.propBundle
+    if 0x05 in props.pIDs:
+        props.set_prop_value_float_by_pid(0x05, gain)
+    else:
+        props.add_prop_value_float(0x05, gain)
+
+
 def run_instr(ctx: ScriptContext, instr_words: list[str]):
     if len(instr_words) < 1:
         raise ValueError("empty instruction")
     instr = interpret_instr(instr_words)
     if instr == None:
-        return
+        match len(instr_words):
+            case 0: raise(BadInstrError(None, "empty instruction"))
+            case 1: raise(BadInstrError(None, "bad instruction: {}"          .format(instr_words[1])))
+            case 2: raise(BadInstrError(None, "bad instruction: {} {}"       .format(*instr_words[:2])))
+            case 3: raise(BadInstrError(None, "bad instruction: {} {} {}"    .format(*instr_words[:3])))
+            case _: raise(BadInstrError(None, "bad instruction: {} {} {} ...".format(*instr_words[:3])))
     match instr[0]:
         case "wd rel":
-            ctx.working_dir = os.path.normpath(instr[1][0])
+            ctx.working_dir = os.path.join(ctx.wd_rel_root, os.path.normpath(instr[1][0]))
+            print("set working directory to '{}'".format(ctx.working_dir))
         case "wd home":
             envvar = "USERPROFILE" if (env.SYSTEM == "Windows") else "HOME"
             if envvar not in os.environ:
                 raise RuntimeError("environment variable '{}' not set".format(envvar))
             ctx.working_dir = os.path.normpath(os.path.join(os.environ[envvar], instr[1][0]))
+            print("set working directory to '{}'".format(ctx.working_dir))
         case "use archive":
             ctx.archives += instr[2]
         case "new set":
@@ -356,38 +430,24 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
             cue_list = [ int(i) for i in ctx.sets[set_name] ]
             file_list = list(set(instr[2])) # remove duplicates
             ctx.replace_cues(cue_list, file_list)
+        case "add seq gain":
+            ctx.set_seq_gain[int(instr[1][0])] = (float(instr[2][0]), True)
+        case "add cue gain":
+            ctx.set_cue_gain[int(instr[1][0])] = (float(instr[2][0]), True)
         case "set seq gain":
-            ctx.set_seq_gain[int(instr[1][0])] = float(instr[2][0])
+            ctx.set_seq_gain[int(instr[1][0])] = (float(instr[2][0]), False)
+        case "set cue gain":
+            ctx.set_cue_gain[int(instr[1][0])] = (float(instr[2][0]), False)
         case "set seq random":
             ctx.set_seq_random[int(instr[1][0])] = True
         case "set seq not random":
             ctx.set_seq_random[int(instr[1][0])] = False
-        case "set cue gain":
-            ctx.set_cue_gain[int(instr[1][0])] = float(instr[2][0])
         case _:
-            match len(instr_words):
-                case 0: raise(BadInstrError(None, "empty instruction"))
-                case 1: raise(BadInstrError(None, "bad instruction: {}"          .format(instr_words[1])))
-                case 2: raise(BadInstrError(None, "bad instruction: {} {}"       .format(*instr_words[:2])))
-                case 3: raise(BadInstrError(None, "bad instruction: {} {} {}"    .format(*instr_words[:3])))
-                case _: raise(BadInstrError(None, "bad instruction: {} {} {} ...".format(*instr_words[:3])))
+            raise Exception("unknown instruction...?")
 
 
-# Commands to describe in documentation:
-# - wd rel DIR[1]
-# - wd home DIR[1]
-# - use archive ARCHIVE[1..N]
-# - use archives ARCHIVE[1..N] # same semantics as above
-# - new set SET_NAME[1]
-# - assign to SET_NAME[1] STRING[1..N]
-# - append to SET_NAME[1] STRING[1..N]
-# - replace ID[1] with FILE[1]
-# - replace cues in ID_SET[1] with FILE[1..N]
-# - set sequence ID[1] gain GAIN[1] db
-# - set sequence ID[1] random
-# - set sequence ID[1] not random
-# - set cue ID[1] gain GAIN[1] db
 def run_script(ctx: ScriptContext, script_filename: str, output_file: str):
+    ctx.soft_reset()
     with open(script_filename, "rt") as file:
         rdr = LineBuffer(file)
         instr = rdr.fetch_instruction()
@@ -432,6 +492,7 @@ def print_cue_replacements(replacements):
 
 def run(app_state, output_file: str | None, input_files: list[str]):
     import_error_is_critical = True # may be opt-out from the command line in the future
+    verbose = False # ditto
     mod_handler = core.ModHandler.get_instance(None)
     mod_handler.create_new_mod("default")
     mod = mod_handler.get_active_mod()
@@ -451,7 +512,8 @@ def run(app_state, output_file: str | None, input_files: list[str]):
         if not mod.load_archive_file(archive_file):
             print("Couldn't find archive '{}'".format(archive_id))
 
-    print_cue_replacements(ctx.cue_replacements_by_file)
+    if verbose:
+        print_cue_replacements(ctx.cue_replacements_by_file)
 
     if import_error_is_critical:
         mod.import_files(ctx.cue_replacements_by_file)
@@ -464,6 +526,15 @@ def run(app_state, output_file: str | None, input_files: list[str]):
                 mod.import_files(single_repl)
             except OSError as e:
                 print("Skipping replacement from '{}':  {}".format(repl_file, e))
+
+    for cue in ctx.set_cue_gain:
+        (value, is_relative) = ctx.set_cue_gain[cue]
+        add = get_cue_gain(mod, cue, assume_zero = True) if is_relative else 0.0
+        set_cue_gain(mod, cue, add + value)
+    for seq in ctx.set_seq_gain:
+        (value, is_relative) = ctx.set_seq_gain[seq]
+        add = get_seq_gain(mod, seq, assume_zero = True) if is_relative else 0.0
+        set_seq_gain(mod, seq, add + value)
 
     output_path = os.path.split(output_file)
     print("Writing patch in '{}' as '{}'".format(*output_path))
