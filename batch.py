@@ -12,6 +12,7 @@ import core
 WHITESPACE_CHARS = { " ", "\t" }
 QUOTE_CHARS = { "'", "\"", "`" }
 SPECIAL_CHARS = set.update(WHITESPACE_CHARS, QUOTE_CHARS, { "\\" })
+MAX_DISPLAY_LINE_LENGTH = 80
 
 
 @dataclass
@@ -293,7 +294,6 @@ class ScriptContext:
 
     def replace_cues(self, cue_list, file_list):
         file_idx_remap = remap_list_indices(len(file_list), len(cue_list))
-        print("DBG REMAP [0..{}] -> {}".format(len(cue_list), file_idx_remap))
         append_repl_by_file = dict()
         for i in range(0, len(cue_list)):
             file = os.path.join(self.working_dir, file_list[file_idx_remap[i]])
@@ -319,7 +319,6 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
     instr = interpret_instr(instr_words)
     if instr == None:
         return
-    print("DBG INSTR: {} {} {}".format(*instr))
     match instr[0]:
         case "wd rel":
             ctx.working_dir = os.path.normpath(instr[1][0])
@@ -400,16 +399,39 @@ def run_script(ctx: ScriptContext, script_filename: str, output_file: str):
                     e.line_num = rdr.current_line()
                 raise e
             instr = rdr.fetch_instruction()
-    # -------- TBW:  MOD ASSEMBLY LOGIC BELOW ----------
-    print("DBG CTX")
-    for ln in ctx.describe():
-        print("   ", end="")
-        print(ln)
-    # -------- TBW:  MOD ASSEMBLY LOGIC ABOVE ----------
+
+
+def print_cue_replacements(replacements):
+    def print_ln(ln):
+        print("    {}".format(ln[0]), end='')
+        for cue in ln[1:]:
+            print(" {}".format(cue), end='')
+        print()
+    print("Replacing the following cues...")
+    for repl_file in replacements:
+        print("  ", end='')
+        print(repl_file)
+        ln = [ ]
+        ln_len = 3
+        for repl_cue in replacements[repl_file]:
+            repl_cue = str(repl_cue)
+            repl_cue_len = len(repl_cue)
+            if ln_len + repl_cue_len > MAX_DISPLAY_LINE_LENGTH:
+                if len(ln) == 0:
+                    print("    {}".format(repl_cue))
+                else:
+                    print_ln(ln)
+                    ln = [ repl_cue ]
+                    ln_len = 3 + repl_cue_len
+            else:
+                ln.append(repl_cue)
+                ln_len += repl_cue_len
+        if len(ln) > 0:
+            print_ln(ln)
 
 
 def run(app_state, output_file: str | None, input_files: list[str]):
-    import_error_is_critical = False # may be opt-in from the command line in the future
+    import_error_is_critical = True # may be opt-out from the command line in the future
     mod_handler = core.ModHandler.get_instance(None)
     mod_handler.create_new_mod("default")
     mod = mod_handler.get_active_mod()
@@ -428,6 +450,20 @@ def run(app_state, output_file: str | None, input_files: list[str]):
         archive_file = os.path.join(app_state.game_data_path, archive_id)
         if not mod.load_archive_file(archive_file):
             print("Couldn't find archive '{}'".format(archive_id))
+
+    print_cue_replacements(ctx.cue_replacements_by_file)
+
+    if import_error_is_critical:
+        mod.import_files(ctx.cue_replacements_by_file)
+    else:
+        # One import for each file: if one file is missing, the rest can
+        # still be imported
+        for repl_file in ctx.cue_replacements_by_file:
+            single_repl = { repl_file: ctx.cue_replacements_by_file[repl_file] }
+            try:
+                mod.import_files(single_repl)
+            except OSError as e:
+                print("Skipping replacement from '{}':  {}".format(repl_file, e))
 
     output_path = os.path.split(output_file)
     print("Writing patch in '{}' as '{}'".format(*output_path))
