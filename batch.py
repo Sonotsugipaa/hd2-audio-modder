@@ -263,7 +263,7 @@ class ScriptContext:
     set_seq_gain: dict[int, float]
     set_seq_random: dict[int, bool]
     set_cue_gain: dict[int, float]
-    
+
     def __init__(self):
         self.archives = [ ]
         self.sets = dict()
@@ -282,15 +282,7 @@ class ScriptContext:
             "set sequences randomness: {}".format(self.set_seq_random),
             "set cues gain: {}".format(self.set_cue_gain) ]
 
-
-def run_instr(ctx: ScriptContext, instr_words: list[str]):
-    if len(instr_words) < 1:
-        raise ValueError("empty instruction")
-    instr = interpret_instr(instr_words)
-    if instr == None:
-        return
-    print("DBG INSTR: {} {} {}".format(*instr))
-    def replace_many(ctx, cue_list, file_list):
+    def replace_cues(self, cue_list, file_list):
         file_idx_remap = remap_list_indices(len(file_list), len(cue_list))
         print("DBG REMAP [0..{}] -> {}".format(len(cue_list), file_idx_remap))
         append_repl_by_file = dict()
@@ -303,13 +295,22 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 append_repl_by_file[file].add(cue)
         for append_file in append_repl_by_file:
             for append_cue in append_repl_by_file[append_file]:
-                if append_cue in ctx.cue_replacements_by_cue:
-                    ctx.cue_replacements_by_file.pop(ctx.cue_replacements_by_cue[append_cue], None)
-                ctx.cue_replacements_by_cue[append_cue] = append_file
-                if append_file not in ctx.cue_replacements_by_file:
-                    ctx.cue_replacements_by_file[append_file] = { append_cue }
+                if append_cue in self.cue_replacements_by_cue:
+                    self.cue_replacements_by_file.pop(self.cue_replacements_by_cue[append_cue], None)
+                self.cue_replacements_by_cue[append_cue] = append_file
+                if append_file not in self.cue_replacements_by_file:
+                    self.cue_replacements_by_file[append_file] = { append_cue }
                 else:
-                    ctx.cue_replacements_by_file[append_file].add(append_cue)
+                    self.cue_replacements_by_file[append_file].add(append_cue)
+
+
+def run_instr(ctx: ScriptContext, instr_words: list[str]):
+    if len(instr_words) < 1:
+        raise ValueError("empty instruction")
+    instr = interpret_instr(instr_words)
+    if instr == None:
+        return
+    print("DBG INSTR: {} {} {}".format(*instr))
     match instr[0]:
         case "use archive":
             ctx.archives += instr[2]
@@ -339,7 +340,7 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 raise KeyError("set '{}' does not exist".format(set_name))
             cue_list = [ int(i) for i in ctx.sets[set_name] ]
             file_list = list(set(instr[2])) # remove duplicates
-            replace_many(ctx, cue_list, file_list)
+            ctx.replace_cues(cue_list, file_list)
         case "set seq gain":
             ctx.set_seq_gain[int(instr[1][0])] = float(instr[2][0])
         case "set seq random":
