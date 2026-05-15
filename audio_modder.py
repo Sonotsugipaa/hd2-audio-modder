@@ -3614,61 +3614,7 @@ def wwise_setup(app_state, show_warnings=False):
             showwarning(title="Wwise Error",
                         message="Error creating Wwise project. Audio import restricted to .wem files only")
 
-
-if __name__ == "__main__":
-    logger.setLevel(logging.INFO)
-    random.seed()
-    app_state: cfg.Config | None = cfg.load_config()
-    if app_state == None:
-        exit(1)
-
-    if os.path.exists(env.WWISE_CLI) and not os.path.exists(app_state.wwise_path):
-        app_state.wwise_path = env.WWISE_CLI
-
-    GAME_FILE_LOCATION = app_state.game_data_path
-    try:
-        if os.path.exists("audio_modder_old.exe"):
-            os.remove("audio_modder_old.exe")
-        if os.path.exists("audio_modder_old"):
-            os.remove("audio_modder_old")
-    except:
-        pass
-    
-    try:
-        if os.path.exists("updater.exe"):
-            os.remove("updater.exe")
-        if os.path.exists("updater"):
-            os.remove("updater")
-    except:
-        pass
-
-    try:
-        if not os.path.exists(CACHE):
-            os.mkdir(CACHE, mode=0o777)
-        if not os.path.exists(TMP):
-            os.mkdir(TMP, mode=0o777)
-    except Exception as e:
-        showerror("Error when initiating application", 
-                    "Failed to create application caching space")
-        exit(1)
-        
-    if not os.path.exists(VGMSTREAM):
-        logger.error("Cannot find vgmstream distribution! " \
-                     f"Ensure the {os.path.dirname(VGMSTREAM)} folder is " \
-                     "in the same folder as the executable")
-        showwarning(title="Missing Plugin", message="Cannot find vgmstream distribution! " \
-                    "Audio playback is disabled.")
-
-    wwise_setup(app_state, show_warnings=True)
-
-    try:
-        slim_init(app_state.game_data_path)
-    except FileNotFoundError:
-        logger.warning("Unable to initialize slim decompression module; game data path may be invalid")
-
-    if sys.argv[1] == "--batch":
-        exit(1)
-
+def run_gui():
     lookup_store: db.FriendlyNameLookup | None = None
     
     if not os.path.exists(GAME_FILE_LOCATION):
@@ -3788,6 +3734,68 @@ if __name__ == "__main__":
     
     SoundHandler.get_instance().kill_sound()
     app_state.save_config()
+
+
+def run_batch(app_state):
+    import batch
+    batch.run(app_state, *batch.parse_command_line_args(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    logger.setLevel(logging.INFO)
+    random.seed()
+    app_state: cfg.Config | None = cfg.load_config()
+    if app_state == None:
+        exit(1)
+
+    if os.path.exists(env.WWISE_CLI) and not os.path.exists(app_state.wwise_path):
+        app_state.wwise_path = env.WWISE_CLI
+
+    GAME_FILE_LOCATION = app_state.game_data_path
+    try:
+        if os.path.exists("audio_modder_old.exe"):
+            os.remove("audio_modder_old.exe")
+        if os.path.exists("audio_modder_old"):
+            os.remove("audio_modder_old")
+    except:
+        pass
+    
+    try:
+        if os.path.exists("updater.exe"):
+            os.remove("updater.exe")
+        if os.path.exists("updater"):
+            os.remove("updater")
+    except:
+        pass
+
+    try:
+        if not os.path.exists(CACHE):
+            os.mkdir(CACHE, mode=0o777)
+        if not os.path.exists(TMP):
+            os.mkdir(TMP, mode=0o777)
+    except Exception as e:
+        showerror("Error when initiating application", 
+                    "Failed to create application caching space")
+        exit(1)
+        
+    if not os.path.exists(VGMSTREAM):
+        logger.error("Cannot find vgmstream distribution! " \
+                     f"Ensure the {os.path.dirname(VGMSTREAM)} folder is " \
+                     "in the same folder as the executable")
+        showwarning(title="Missing Plugin", message="Cannot find vgmstream distribution! " \
+                    "Audio playback is disabled.")
+
+    wwise_setup(app_state, show_warnings=True)
+
+    try:
+        slim_init(app_state.game_data_path)
+    except FileNotFoundError:
+        logger.warning("Unable to initialize slim decompression module; game data path may be invalid")
+
+    if len(sys.argv) > 1:
+        run_batch(app_state)
+    else:
+        run_gui()
 
     if os.path.exists(CACHE):
         shutil.rmtree(CACHE)
