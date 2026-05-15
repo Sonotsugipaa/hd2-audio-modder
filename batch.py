@@ -2,7 +2,9 @@ import sys
 import os
 from dataclasses import dataclass
 from io import StringIO
+import re
 
+import env
 import core
 
 
@@ -221,6 +223,11 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
         instr_fam = instr[0]
         instr = instr[1:]
         match instr_fam:
+            case "wd":
+                if match_word_seq(instr, "rel"):
+                    return ("wd rel", [instr[1]], None)
+                elif match_word_seq(instr, "home"):
+                    return ("wd home", [instr[1]], None)
             case "replace":
                 if match_word_seq(instr, None, "with", None):
                     return ("replace one", [instr[0]], [instr[2]])
@@ -256,6 +263,7 @@ def remap_list_indices(src, dst):
 
 
 class ScriptContext:
+    working_dir: str
     archives: list[str]
     sets: dict[str, set(str)]
     cue_replacements_by_cue:  dict[int, str]
@@ -265,6 +273,7 @@ class ScriptContext:
     set_cue_gain: dict[int, float]
 
     def __init__(self):
+        self.working_dir = ""
         self.archives = [ ]
         self.sets = dict()
         self.cue_replacements_by_cue = dict()
@@ -287,7 +296,7 @@ class ScriptContext:
         print("DBG REMAP [0..{}] -> {}".format(len(cue_list), file_idx_remap))
         append_repl_by_file = dict()
         for i in range(0, len(cue_list)):
-            file = file_list[file_idx_remap[i]]
+            file = os.path.join(self.working_dir, file_list[file_idx_remap[i]])
             cue = cue_list[i]
             if file not in append_repl_by_file:
                 append_repl_by_file[file] = { cue }
@@ -312,6 +321,13 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
         return
     print("DBG INSTR: {} {} {}".format(*instr))
     match instr[0]:
+        case "wd rel":
+            ctx.working_dir = os.path.normpath(instr[1][0])
+        case "wd home":
+            envvar = "USERPROFILE" if (env.SYSTEM == "Windows") else "HOME"
+            if envvar not in os.environ:
+                raise RuntimeError("environment variable '{}' not set".format(envvar))
+            ctx.working_dir = os.path.normpath(os.path.join(os.environ[envvar], instr[1][0]))
         case "use archive":
             ctx.archives += instr[2]
         case "new set":
@@ -326,7 +342,7 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 ctx.sets[set_name].update(instr[2])
         case "replace one":
             cue = int(instr[1][0])
-            file = instr[2][0]
+            file = os.path.join(ctx.working_dir, instr[2][0])
             if cue in ctx.cue_replacements_by_cue:
                 ctx.cue_replacements_by_file.pop(ctx.cue_replacements_by_cue[cue], None)
             ctx.cue_replacements_by_cue[cue] = file
@@ -359,6 +375,8 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
 
 
 # Commands to describe in documentation:
+# - wd rel DIR[1]
+# - wd home DIR[1]
 # - use archive ARCHIVE[1..N]
 # - use archives ARCHIVE[1..N] # same semantics as above
 # - new set SET_NAME[1]
@@ -407,8 +425,7 @@ def run(app_state, output_file: str | None, input_files: list[str]):
         run_script(ctx, i_file, output_file)
 
     for archive_id in ctx.archives:
-        archive_file = "{}/{}".format(app_state.game_data_path, archive_id)
-        wd = os.path.dirname(os.path.realpath(__file__))
+        archive_file = os.path.join(app_state.game_data_path, archive_id)
         if not mod.load_archive_file(archive_file):
             print("Couldn't find archive '{}'".format(archive_id))
 
