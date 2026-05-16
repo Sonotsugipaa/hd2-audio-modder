@@ -380,6 +380,13 @@ def set_seq_gain(mod, seq_id, gain):
         props.add_prop_value_float(0x05, gain)
 
 
+def set_seq_random(mod, seq_id, value):
+    hent = mod.get_hierarchy_entry(seq_id)
+    playlist_setting = copy.deepcopy(hent.playListSetting)
+    playlist_setting.eMode = 0 if value else 1 # 1 means NOT random!?
+    hent.set_data(baseParam = hent.baseParam, playListSetting = playlist_setting)
+
+
 def run_instr(ctx: ScriptContext, instr_words: list[str]):
     if len(instr_words) < 1:
         raise ValueError("empty instruction")
@@ -535,6 +542,8 @@ def run(app_state, output_file: str | None, input_files: list[str]):
         (value, is_relative) = ctx.set_seq_gain[seq]
         add = get_seq_gain(mod, seq, assume_zero = True) if is_relative else 0.0
         set_seq_gain(mod, seq, add + value)
+    for seq in ctx.set_seq_random:
+        set_seq_random(mod, seq, ctx.set_seq_random[seq])
 
     output_path = os.path.split(output_file)
     print("Writing patch in '{}' as '{}'".format(*output_path))
