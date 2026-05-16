@@ -3736,12 +3736,25 @@ def run_gui():
     app_state.save_config()
 
 
-def run_batch(app_state):
-    import batch
-    batch.run(app_state, *batch.parse_command_line_args(sys.argv[1:]))
+def run_batch(app_state, args):
+    batch.run(app_state, *args)
 
 
 if __name__ == "__main__":
+    import batch
+    if len(sys.argv) > 1:
+        cmdln_args = batch.parse_command_line_args(sys.argv[1:])
+        if cmdln_args == None:
+            arg0 = os.path.basename(sys.argv[0])
+            print("Usage:")
+            print("   # open the application normally")
+            print("   {}")
+            print("   # run one or more batch jobs")
+            print("   {} -o OUTPUT1 SRC_1 ... SRC_N [-o OUTPUT2 SRC_2 ... SRC_N]")
+            exit(1)
+    else:
+        cmdln_args = None
+
     logger.setLevel(logging.INFO)
     random.seed()
     app_state: cfg.Config | None = cfg.load_config()
@@ -3774,7 +3787,7 @@ if __name__ == "__main__":
         if not os.path.exists(TMP):
             os.mkdir(TMP, mode=0o777)
     except Exception as e:
-        showerror("Error when initiating application", 
+        showerror("Error when initiating application",
                     "Failed to create application caching space")
         exit(1)
         
@@ -3792,8 +3805,8 @@ if __name__ == "__main__":
     except FileNotFoundError:
         logger.warning("Unable to initialize slim decompression module; game data path may be invalid")
 
-    if len(sys.argv) > 1:
-        run_batch(app_state)
+    if cmdln_args:
+        run_batch(app_state, cmdln_args)
     else:
         run_gui()
 

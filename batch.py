@@ -49,9 +49,12 @@ class BadInstrError(RuntimeError):
 
 
 def parse_command_line_args(args):
+    if len(args) < 1:
+        return None
     literal_args = False
     argn = len(args)
     i = 0
+    io_pairs = [ ]
     input_files = [ ]
     output_file = None
     arg = None
@@ -59,6 +62,9 @@ def parse_command_line_args(args):
         arg = args[i]
         if arg.startswith("-o"):
             j = i+1
+            if output_file != None:
+                io_pairs.append((output_file, input_files))
+                input_files = [ ]
             if j < argn:
                 output_file = args[j]
                 i = j
@@ -74,7 +80,9 @@ def parse_command_line_args(args):
             break
     for arg in args[i:]:
         input_files.append(arg)
-    return (output_file, input_files)
+    if output_file != None:
+        io_pairs.append((output_file, input_files))
+    return (io_pairs,)
 
 
 def parse_instr(line_ctr: int, line: str) -> line[str]:
@@ -498,54 +506,62 @@ def print_cue_replacements(replacements):
             print_ln(ln)
 
 
-def run(app_state, output_file: str | None, input_files: list[str]):
+def build_patch(app_state, output_file: str | None, input_files: list[str]):
     import_error_is_critical = True # may be opt-out from the command line in the future
     verbose = False # ditto
     mod_handler = core.ModHandler.get_instance(None)
     mod_handler.create_new_mod("default")
     mod = mod_handler.get_active_mod()
+    try:
+        match output_file:
+            case None:
+                raise ValueError("no output specified")
+            case "":
+                raise ValueError("null output specified")
+        ctx = ScriptContext()
+        for i_file in input_files:
+            print("Running batch script '{}'...".format(i_file))
+            run_script(ctx, i_file, output_file)
 
-    match output_file:
-        case None:
-            raise ValueError("no output specified")
-        case "":
-            raise ValueError("null output specified")
-    ctx = ScriptContext()
-    for i_file in input_files:
-        print("Running batch script '{}'...".format(i_file))
-        run_script(ctx, i_file, output_file)
+        for archive_id in ctx.archives:
+            archive_file = os.path.join(app_state.game_data_path, archive_id)
+            if not mod.load_archive_file(archive_file):
+                print("Couldn't find archive '{}'".format(archive_id))
 
-    for archive_id in ctx.archives:
-        archive_file = os.path.join(app_state.game_data_path, archive_id)
-        if not mod.load_archive_file(archive_file):
-            print("Couldn't find archive '{}'".format(archive_id))
+        if verbose:
+            print_cue_replacements(ctx.cue_replacements_by_file)
 
-    if verbose:
-        print_cue_replacements(ctx.cue_replacements_by_file)
+        if import_error_is_critical:
+            mod.import_files(ctx.cue_replacements_by_file)
+        else:
+            # One import for each file: if one file is missing, the rest can
+            # still be imported
+            for repl_file in ctx.cue_replacements_by_file:
+                single_repl = { repl_file: ctx.cue_replacements_by_file[repl_file] }
+                try:
+                    mod.import_files(single_repl)
+                except OSError as e:
+                    print("Skipping replacement from '{}':  {}".format(repl_file, e))
 
-    if import_error_is_critical:
-        mod.import_files(ctx.cue_replacements_by_file)
-    else:
-        # One import for each file: if one file is missing, the rest can
-        # still be imported
-        for repl_file in ctx.cue_replacements_by_file:
-            single_repl = { repl_file: ctx.cue_replacements_by_file[repl_file] }
-            try:
-                mod.import_files(single_repl)
-            except OSError as e:
-                print("Skipping replacement from '{}':  {}".format(repl_file, e))
+        for cue in ctx.set_cue_gain:
+            (value, is_relative) = ctx.set_cue_gain[cue]
+            add = get_cue_gain(mod, cue, assume_zero = True) if is_relative else 0.0
+            set_cue_gain(mod, cue, add + value)
+        for seq in ctx.set_seq_gain:
+            (value, is_relative) = ctx.set_seq_gain[seq]
+            add = get_seq_gain(mod, seq, assume_zero = True) if is_relative else 0.0
+            set_seq_gain(mod, seq, add + value)
+        for seq in ctx.set_seq_random:
+            set_seq_random(mod, seq, ctx.set_seq_random[seq])
 
-    for cue in ctx.set_cue_gain:
-        (value, is_relative) = ctx.set_cue_gain[cue]
-        add = get_cue_gain(mod, cue, assume_zero = True) if is_relative else 0.0
-        set_cue_gain(mod, cue, add + value)
-    for seq in ctx.set_seq_gain:
-        (value, is_relative) = ctx.set_seq_gain[seq]
-        add = get_seq_gain(mod, seq, assume_zero = True) if is_relative else 0.0
-        set_seq_gain(mod, seq, add + value)
-    for seq in ctx.set_seq_random:
-        set_seq_random(mod, seq, ctx.set_seq_random[seq])
+        output_path = os.path.split(output_file)
+        print("Writing patch in '{}' as '{}'".format(*output_path))
+        mod.write_patch(*output_path)
+    finally:
+        mod_handler.delete_mod(mod)
 
-    output_path = os.path.split(output_file)
-    print("Writing patch in '{}' as '{}'".format(*output_path))
-    mod.write_patch(*output_path)
+
+
+def run(app_state, io_pairs: list[tuple(str, list[str])]):
+    for pair in io_pairs:
+        build_patch(app_state, *pair)
