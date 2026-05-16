@@ -373,11 +373,12 @@ def get_seq_gain(mod, seq_id, *, assume_zero = False):
 
 def set_seq_gain(mod, seq_id, gain):
     hent = mod.get_hierarchy_entry(seq_id)
-    props = hent.baseParam.propBundle
-    if 0x05 in props.pIDs:
-        props.set_prop_value_float_by_pid(0x05, gain)
+    base_param = copy.deepcopy(hent.baseParam)
+    if 0x05 in base_param.propBundle.pIDs:
+        base_param.propBundle.set_prop_value_float_by_pid(0x05, gain)
     else:
-        props.add_prop_value_float(0x05, gain)
+        base_param.propBundle.add_prop_value_float(0x05, gain)
+    hent.set_data(baseParam = base_param)
 
 
 def set_seq_random(mod, seq_id, value):
