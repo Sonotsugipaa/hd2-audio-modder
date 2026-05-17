@@ -192,6 +192,8 @@ class LineBuffer:
 
 
 def interpret_instr(instr) -> tuple(str, list[str], list[str]):
+    # This function would be a bit faster and possibly
+    # much more readable if it was a FSM
     """
     Returns a tuple containing:
     - a string describing the command;
@@ -199,15 +201,14 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
     - a list containing values of the variadic argument, or None if no
       variadic argument is expected.
     """
-    VARIADIC = "?VARARG"
+    VARIADIC = "\x1b"
     def match_word_seq(lh: list[str], *rh_match_lists: tuple(str | list[str])):
         lh_len = len(lh)
         rh_len = len(rh_match_lists)
-        lengths_match = (lh_len == rh_len)
         if rh_match_lists[-1] == VARIADIC:
             rh_match_lists = (*rh_match_lists[:-1], None)
-            if lh_len > rh_len:
-                lengths_match = True
+            if lh_len < rh_len-1:
+                return False
         for i in range(0, rh_len):
             rh_does_match = False
             rh_list = rh_match_lists[i]
@@ -232,6 +233,27 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
         return ("assign to", [instr[2]], instr[3:])
     elif match_word_seq(instr, "append", "to", None, VARIADIC):
         return ("append to", [instr[2]], instr[3:])
+    elif match_word_seq(instr, None, "gain", None, "db", "to", None, VARIADIC):
+        match instr[0]:
+            case "set": is_rel = False
+            case "add": is_rel = True
+            case _: return None
+        if instr_len > 6:
+            match instr[5]:
+                case "sequence" | "sequences":
+                    return ("set gain by list", [is_rel, "seq", instr[2]], instr[6:])
+                case "cue" | "cues":
+                    return ("set gain by list", [is_rel, "cue", instr[2]], instr[6:])
+                case "each":
+                    if instr_len < 8: return None
+                    dst_spec = instr[6:]
+                    if match_word_seq(dst_spec, "sequence", "in", None):
+                        return ("set gain by ref", [is_rel, "seq", instr[8], instr[2]], None)
+                    elif match_word_seq(dst_spec, "cue", "in", None):
+                        return ("set gain by ref", [is_rel, "cue", instr[8], instr[2]], None)
+                    else: return
+                case _: return None
+        else: return
     elif instr_len >= 1:
         instr_fam = instr[0]
         instr = instr[1:]
@@ -247,19 +269,13 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
                 elif match_word_seq(instr, "cues", "in", None, "with", VARIADIC):
                     return ("replace many", [instr[2]], instr[4:])
             case "set":
-                if match_word_seq(instr, "sequence", None, "gain", None, "db"):
-                    return ("set seq gain", [instr[1]], [instr[3]])
-                elif match_word_seq(instr, "sequence", None, "random"):
-                    return ("set seq random", [instr[1]], None)
+                if match_word_seq(instr, "sequence", None, "random"):
+                    return ("set sequence random", [instr[1]], None)
                 elif match_word_seq(instr, "sequence", None, "not", "random"):
-                    return ("set seq not random", [instr[1]], None)
-                elif match_word_seq(instr, "cue", None, "gain", None, "db"):
-                    return ("set cue gain", [instr[1]], [instr[3]])
-            case "add":
-                if match_word_seq(instr, "sequence", None, "gain", None, "db"):
-                    return ("add seq gain", [instr[1]], [instr[3]])
-                elif match_word_seq(instr, "cue", None, "gain", None, "db"):
-                    return ("add cue gain", [instr[1]], [instr[3]])
+                    return ("set sequence not random", [instr[1]], None)
+            case _:
+                return None
+
     return None
 
 
@@ -317,6 +333,7 @@ class ScriptContext:
             "set cues gain: {}".format(self.set_cue_gain) ]
 
     def replace_cues(self, cue_list, file_list):
+        if len(file_list) < 1: return
         file_idx_remap = remap_list_indices(len(file_list), len(cue_list))
         append_repl_by_file = dict()
         for i in range(0, len(cue_list)):
@@ -361,10 +378,10 @@ def set_cue_gain(mod, cue_id, gain):
         parent_base_params.append(copy.deepcopy(parent.baseParam))
         parents.append(parent)
     for base_param in parent_base_params:
-        if 0x05 not in base_param.propBundle.pIDs:
-            base_param.propBundle.add_prop_value_float(0x05, gain)
-        else:
+        if 0x05 in base_param.propBundle.pIDs:
             base_param.propBundle.set_prop_value_float_by_pid(0x05, gain)
+        elif gain != 0.0:
+            base_param.propBundle.add_prop_value_float(0x05, gain)
     if len(parents) > 0:
         for i, parent in enumerate(parents):
             parent.set_data(baseParam = parent_base_params[i])
@@ -384,7 +401,7 @@ def set_seq_gain(mod, seq_id, gain):
     base_param = copy.deepcopy(hent.baseParam)
     if 0x05 in base_param.propBundle.pIDs:
         base_param.propBundle.set_prop_value_float_by_pid(0x05, gain)
-    else:
+    elif gain != 0.0:
         base_param.propBundle.add_prop_value_float(0x05, gain)
     hent.set_data(baseParam = base_param)
 
@@ -397,6 +414,10 @@ def set_seq_random(mod, seq_id, value):
 
 
 def run_instr(ctx: ScriptContext, instr_words: list[str]):
+    def expand_set(ctx, name):
+        if name not in ctx.sets:
+            raise KeyError("set '{}' does not exist".format(name))
+        return ctx.sets[name]
     if len(instr_words) < 1:
         raise ValueError("empty instruction")
     instr = interpret_instr(instr_words)
@@ -410,13 +431,11 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
     match instr[0]:
         case "wd rel":
             ctx.working_dir = os.path.join(ctx.wd_rel_root, os.path.normpath(instr[1][0]))
-            print("set working directory to '{}'".format(ctx.working_dir))
         case "wd home":
             envvar = "USERPROFILE" if (env.SYSTEM == "Windows") else "HOME"
             if envvar not in os.environ:
                 raise RuntimeError("environment variable '{}' not set".format(envvar))
             ctx.working_dir = os.path.normpath(os.path.join(os.environ[envvar], instr[1][0]))
-            print("set working directory to '{}'".format(ctx.working_dir))
         case "use archive":
             ctx.archives += instr[2]
         case "new set":
@@ -440,23 +459,24 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
             else:
                 ctx.cue_replacements_by_file[file].add(cue)
         case "replace many":
-            set_name = instr[1][0]
-            if set_name not in ctx.sets:
-                raise KeyError("set '{}' does not exist".format(set_name))
-            cue_list = [ int(i) for i in ctx.sets[set_name] ]
+            cue_list = [ int(i) for i in expand_set(ctx, instr[1][0]) ]
             file_list = list(set(instr[2])) # remove duplicates
             ctx.replace_cues(cue_list, file_list)
-        case "add seq gain":
-            ctx.set_seq_gain[int(instr[1][0])] = (float(instr[2][0]), True)
-        case "add cue gain":
-            ctx.set_cue_gain[int(instr[1][0])] = (float(instr[2][0]), True)
-        case "set seq gain":
-            ctx.set_seq_gain[int(instr[1][0])] = (float(instr[2][0]), False)
-        case "set cue gain":
-            ctx.set_cue_gain[int(instr[1][0])] = (float(instr[2][0]), False)
-        case "set seq random":
+        case "set gain by list":
+            is_rel = instr[1][0]
+            target = ctx.set_seq_gain if (instr[1][1] == "seq") else ctx.set_cue_gain
+            gain = float(instr[1][2])
+            for cue in instr[2]:
+                target[int(cue)] = (gain, is_rel)
+        case "set gain by ref":
+            is_rel = instr[1][0]
+            target = ctx.set_seq_gain if (instr[1][1] == "seq") else ctx.set_cue_gain
+            gain = float(instr[1][3])
+            for cue in expand_set(ctx, instr[1][2]):
+                target[int(cue)] = (gain, is_rel)
+        case "set sequence random":
             ctx.set_seq_random[int(instr[1][0])] = True
-        case "set seq not random":
+        case "set sequence not random":
             ctx.set_seq_random[int(instr[1][0])] = False
         case _:
             raise Exception("unknown instruction...?")
