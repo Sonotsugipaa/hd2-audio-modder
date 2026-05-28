@@ -8,6 +8,7 @@ import copy
 
 import env
 import core
+import config as cfg
 import wwise_hierarchy_154
 import wwise_hierarchy_140
 
@@ -265,9 +266,11 @@ def interpret_instr(instr) -> tuple(str, list[str], list[str]):
                     return ("wd home", [instr[1]], None)
             case "replace":
                 if match_word_seq(instr, None, "with", None):
-                    return ("replace one", [instr[0]], [instr[2]])
+                    return ("replace one", [instr[0], instr[2]], None)
                 elif match_word_seq(instr, "cues", "in", None, "with", VARIADIC):
                     return ("replace many", [instr[2]], instr[4:])
+                if match_word_seq(instr, "sequence", None, "with", VARIADIC):
+                    return ("replace sequence", [instr[1]], instr[3:])
             case "set":
                 if match_word_seq(instr, "sequence", None, "random"):
                     return ("set sequence random", [instr[1]], None)
@@ -297,9 +300,10 @@ def remap_list_indices(src, dst):
 
 
 class ScriptContext:
+    mod: core.Mod
+    game_data_path: str
     wd_rel_root: str
     working_dir: str
-    archives: list[str]
     sets: dict[str, set(str)]
     cue_replacements_by_cue:  dict[int, str]
     cue_replacements_by_file: dict[str, set(int)]
@@ -307,18 +311,19 @@ class ScriptContext:
     set_cue_gain: dict[int, (float, bool)] # ditto
     set_seq_random: dict[int, bool]
 
-    def __init__(self):
+    def __init__(self, app_state: cfg.Config, mod: core.Mod):
         envvar = "HD2AM_BATCH_REL_ROOT"
         envvar = os.environ[envvar] if (envvar in os.environ) else ""
+        self.mod = mod
+        self.game_data_path = app_state.game_data_path
         self.wd_rel_root = os.path.normpath(envvar)
         self.working_dir = self.wd_rel_root
-        self.archives = [ ]
         self.sets = dict()
         self.cue_replacements_by_cue = dict()
         self.cue_replacements_by_file = dict()
         self.set_seq_gain = dict()
-        self.set_seq_random = dict()
         self.set_cue_gain = dict()
+        self.set_seq_random = dict()
 
     def soft_reset(self):
         self.working_dir = self.wd_rel_root
@@ -332,7 +337,7 @@ class ScriptContext:
             "set sequences randomness: {}".format(self.set_seq_random),
             "set cues gain: {}".format(self.set_cue_gain) ]
 
-    def replace_cues(self, cue_list, file_list):
+    def replace_cues(self, cue_list: list[int], file_list: list[str]):
         if len(file_list) < 1: return
         file_idx_remap = remap_list_indices(len(file_list), len(cue_list))
         append_repl_by_file = dict()
@@ -352,6 +357,20 @@ class ScriptContext:
                     self.cue_replacements_by_file[append_file] = { append_cue }
                 else:
                     self.cue_replacements_by_file[append_file].add(append_cue)
+
+    def replace_seq(self, seq_id, file_list):
+        sound_ids = self.mod.get_hierarchy_entry(seq_id).children.children
+        for sound_id in sound_ids:
+            hent = self.mod.get_hierarchy_entry(sound_id)
+            if not isinstance(hent, (wwise_hierarchy_154.Sound, wwise_hierarchy_140.Sound)):
+                raise ValueError("hierarchy entry {} is not a Sound".format(sound_id))
+            srcs = hent.sources
+            cue_list = [ ]
+            for src in srcs:
+                if not isinstance(src, (wwise_hierarchy_154.BankSourceStruct, wwise_hierarchy_140.BankSourceStruct)):
+                    raise ValueError("hierarchy entry {} is not a BankSourceStruct".format(src.hierarchy_id))
+                cue_list.append(src.source_id)
+            self.replace_cues(cue_list, file_list)
 
 
 def get_cue_gain(mod, cue_id, *, assume_zero = False):
@@ -437,7 +456,10 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 raise RuntimeError("environment variable '{}' not set".format(envvar))
             ctx.working_dir = os.path.normpath(os.path.join(os.environ[envvar], instr[1][0]))
         case "use archive":
-            ctx.archives += instr[2]
+            for archive_id in instr[2]:
+                archive_file = os.path.join(ctx.game_data_path, archive_id)
+                if not ctx.mod.load_archive_file(archive_file):
+                    print("Couldn't find archive '{}'".format(archive_id))
         case "new set":
             ctx.sets[instr[1][0]] = set()
         case "assign to":
@@ -450,7 +472,7 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 ctx.sets[set_name].update(instr[2])
         case "replace one":
             cue = int(instr[1][0])
-            file = os.path.join(ctx.working_dir, instr[2][0])
+            file = os.path.join(ctx.working_dir, instr[1][1])
             if cue in ctx.cue_replacements_by_cue:
                 ctx.cue_replacements_by_file.pop(ctx.cue_replacements_by_cue[cue], None)
             ctx.cue_replacements_by_cue[cue] = file
@@ -460,8 +482,11 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
                 ctx.cue_replacements_by_file[file].add(cue)
         case "replace many":
             cue_list = [ int(i) for i in expand_set(ctx, instr[1][0]) ]
-            file_list = list(set(instr[2])) # remove duplicates
+            file_list = instr[2]
             ctx.replace_cues(cue_list, file_list)
+        case "replace sequence":
+            seq_id = int(instr[1][0])
+            ctx.replace_seq(int(instr[1][0]), instr[2])
         case "set gain by list":
             is_rel = instr[1][0]
             target = ctx.set_seq_gain if (instr[1][1] == "seq") else ctx.set_cue_gain
@@ -526,7 +551,7 @@ def print_cue_replacements(replacements):
             print_ln(ln)
 
 
-def build_patch(app_state, output_file: str | None, input_files: list[str]):
+def build_patch(app_state: cfg.Config, output_file: str | None, input_files: list[str]):
     import_error_is_critical = True # may be opt-out from the command line in the future
     verbose = False # ditto
     mod_handler = core.ModHandler.get_instance(None)
@@ -538,15 +563,10 @@ def build_patch(app_state, output_file: str | None, input_files: list[str]):
                 raise ValueError("no output specified")
             case "":
                 raise ValueError("null output specified")
-        ctx = ScriptContext()
+        ctx = ScriptContext(app_state, mod)
         for i_file in input_files:
             print("Running batch script '{}'...".format(i_file))
             run_script(ctx, i_file, output_file)
-
-        for archive_id in ctx.archives:
-            archive_file = os.path.join(app_state.game_data_path, archive_id)
-            if not mod.load_archive_file(archive_file):
-                print("Couldn't find archive '{}'".format(archive_id))
 
         if verbose:
             print_cue_replacements(ctx.cue_replacements_by_file)
@@ -582,6 +602,6 @@ def build_patch(app_state, output_file: str | None, input_files: list[str]):
 
 
 
-def run(app_state, io_pairs: list[tuple(str, list[str])]):
+def run(app_state: cfg.Config, io_pairs: list[tuple(str, list[str])]):
     for pair in io_pairs:
         build_patch(app_state, *pair)
