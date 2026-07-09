@@ -360,17 +360,17 @@ class ScriptContext:
 
     def replace_seq(self, seq_id, file_list):
         sound_ids = self.mod.get_hierarchy_entry(seq_id).children.children
+        cue_list = [ ]
         for sound_id in sound_ids:
             hent = self.mod.get_hierarchy_entry(sound_id)
             if not isinstance(hent, (wwise_hierarchy_154.Sound, wwise_hierarchy_140.Sound)):
                 raise ValueError("hierarchy entry {} is not a Sound".format(sound_id))
             srcs = hent.sources
-            cue_list = [ ]
             for src in srcs:
                 if not isinstance(src, (wwise_hierarchy_154.BankSourceStruct, wwise_hierarchy_140.BankSourceStruct)):
                     raise ValueError("hierarchy entry {} is not a BankSourceStruct".format(src.hierarchy_id))
                 cue_list.append(src.source_id)
-            self.replace_cues(cue_list, file_list)
+        self.replace_cues(cue_list, file_list)
 
 
 def get_cue_gain(mod, cue_id, *, assume_zero = False):
@@ -486,7 +486,7 @@ def run_instr(ctx: ScriptContext, instr_words: list[str]):
             ctx.replace_cues(cue_list, file_list)
         case "replace sequence":
             seq_id = int(instr[1][0])
-            ctx.replace_seq(int(instr[1][0]), instr[2])
+            ctx.replace_seq(seq_id, instr[2])
         case "set gain by list":
             is_rel = instr[1][0]
             target = ctx.set_seq_gain if (instr[1][1] == "seq") else ctx.set_cue_gain
